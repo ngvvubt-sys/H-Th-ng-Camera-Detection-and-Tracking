@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Object Detection & Tracking</title>
+    <style>
+        body {
+            font-family: Arial;
+            background: #f4f6f8;
+            text-align: center;
+        }
+        h1 {
+            margin-top: 20px;
+        }
+        .container {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .video-box {
+            border: 2px solid #333;
+            padding: 10px;
+            background: #fff;
+        }
+        .controls {
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 0 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Hệ thống theo dõi & phát hiện đối tượng</h1>
+
+<div class="container">
+    <div class="video-box">
+        <img src="/video_feed" width="720">
+    </div>
+</div>
+
+<div class="controls">
+    <button onclick="start()">Start</button>
+    <button onclick="stop()">Stop</button>
+</div>
+
+<script>
+    function start() {
+        fetch('/start');
+    }
+
+    function stop() {
+        fetch('/stop');
+    }
+</script>
+
+</body>
+</html>
