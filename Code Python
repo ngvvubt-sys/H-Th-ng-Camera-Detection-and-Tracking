@@ -9,30 +9,40 @@ import os
 import json
 import time
 from datetime import datetime
+from collections import deque
 
 app = Flask(__name__)
 
-# --- CẤU HÌNH ĐƯỜNG DẪN ---
+# CẤU HÌNH
 VIDEO_SOURCE = r"C:\Users\LENOVO\Downloads\bandemtrom.mp4"
 IMAGE_DIR = "static/images"
 CLIP_DIR = "static/clips"
 LOG_FILE = "history.json"
 
-for d in [IMAGE_DIR, CLIP_DIR]: os.makedirs(d, exist_ok=True)
+for d in [IMAGE_DIR, CLIP_DIR]:
+    os.makedirs(d, exist_ok=True)
 
-# --- KHỞI TẠO AI ---
+# --- AI ---
 model = YOLO("yolo11n.pt")
 tracker = sv.ByteTrack()
 label_annotator = sv.LabelAnnotator()
 
-# Biến lưu vùng cấm
+# --- ROI ---
 area_points = None
 last_alert_time = 0
-ALERT_COOLDOWN = 15  # giây
+ALERT_COOLDOWN = 15
 
-# Video Capture
+# --- VIDEO ---
 cap = cv2.VideoCapture(VIDEO_SOURCE)
-FPS = int(cap.get(cv2.CAP_PROP_FPS)) or 25
+FPS_SRC = int(cap.get(cv2.CAP_PROP_FPS)) or 25
+
+#  THỐNG KÊ
+frame_times = deque(maxlen=30)
+
+# GIẢM TẦN SUẤT YOLO
+DETECT_EVERY = 3          # YOLO chạy mỗi 3 frame
+frame_id = 0
+last_detections = None
 
 
 def play_alarm():
@@ -45,13 +55,13 @@ def save_clip_worker(filename, frames_snapshot):
     path = os.path.join(CLIP_DIR, filename)
     h, w, _ = frames_snapshot[0].shape
     fourcc = cv2.VideoWriter_fourcc(*'vp80')
-    out = cv2.VideoWriter(path, fourcc, FPS, (w, h))
+    out = cv2.VideoWriter(path, fourcc, FPS_SRC, (w, h))
     for f in frames_snapshot:
         out.write(f)
     out.release()
 
 
-# --- GIAI ĐOẠN 1: THIẾT LẬP VÙNG CẤM ---
+#  VẼ ROI
 def setup_roi():
     global area_points
     points = []
@@ -67,12 +77,19 @@ def setup_roi():
 
     while True:
         ret, img = cap.read()
-        if not ret: cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
-        img = cv2.resize(img, (640, 360))  # resize nhỏ hơn để nhanh hơn
-        for p in points: cv2.circle(img, (p[0], p[1]), 5, (0, 0, 255), -1)
-        if len(points) > 1: cv2.polylines(img, [np.array(points)], False, (0, 255, 255), 2)
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+
+        img = cv2.resize(img, (640, 360))
+        for p in points:
+            cv2.circle(img, (p[0], p[1]), 5, (0, 0, 255), -1)
+        if len(points) > 1:
+            cv2.polylines(img, [np.array(points)], False, (0, 255, 255), 2)
+
         cv2.imshow("VE ROI - ENTER DE HOAN THANH", img)
-        if cv2.waitKey(1) == 13 and len(points) >= 3: break
+        if cv2.waitKey(1) == 13 and len(points) >= 3:
+            break
 
     area_points = np.array(points, np.int32)
     cv2.destroyAllWindows()
@@ -81,12 +98,15 @@ def setup_roi():
 setup_roi()
 
 
+# STREAM
 def generate_stream():
-    global last_alert_time
-    clip_frames = []  # buffer động cho clip khi cảnh báo
-    alert_active = False
+    global last_alert_time, frame_id, last_detections
+    clip_frames = []
 
     while True:
+        start_time = time.time()
+        frame_id += 1
+
         ret, frame = cap.read()
         if not ret:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -94,38 +114,56 @@ def generate_stream():
 
         frame = cv2.resize(frame, (640, 360))
 
-        # YOLO Detection
-        results = model(frame, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(results)
-        detections = detections[detections.class_id == 0]
-        detections = tracker.update_with_detections(detections)
+        #  YOLO CHẠY GIÁN ĐOẠN
+        if frame_id % DETECT_EVERY == 0:
+            results = model(frame, verbose=False)[0]
+            detections = sv.Detections.from_ultralytics(results)
+            detections = detections[detections.class_id == 0]
+            detections = tracker.update_with_detections(detections)
+            last_detections = detections
+        else:
+            detections = last_detections
+
+        if detections is None:
+            continue
 
         current_alert = False
-        if len(detections) > 0:
-            for i in range(len(detections)):
-                coords = detections.xyxy[i]
-                cx, cy = int((coords[0] + coords[2]) / 2), int(coords[3])
-                is_inside = cv2.pointPolygonTest(area_points, (cx, cy), False)
 
-                if is_inside >= 0:
-                    current_alert = True
-                    color = (0, 0, 255)
-                    cv2.putText(frame, "!!! XAM NHAP !!!", (int(coords[0]), int(coords[1] - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    threading.Thread(target=play_alarm, daemon=True).start()
-                else:
-                    color = (0, 255, 0)
+        for i in range(len(detections)):
+            coords = detections.xyxy[i]
+            cx = int((coords[0] + coords[2]) / 2)
+            cy = int(coords[3])
 
-                cv2.rectangle(frame, (int(coords[0]), int(coords[1])),
-                              (int(coords[2]), int(coords[3])), color, 2)
+            inside = cv2.pointPolygonTest(area_points, (cx, cy), False)
 
-        # Lưu clip + ảnh khi phát hiện
+            if inside >= 0:
+                current_alert = True
+                color = (0, 0, 255)
+                cv2.putText(
+                    frame, "!!! XAM NHAP !!!",
+                    (int(coords[0]), int(coords[1] - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2
+                )
+                threading.Thread(target=play_alarm, daemon=True).start()
+            else:
+                color = (0, 255, 0)
+
+            cv2.rectangle(
+                frame,
+                (int(coords[0]), int(coords[1])),
+                (int(coords[2]), int(coords[3])),
+                color, 2
+            )
+
+        # ===== LƯU SỰ KIỆN =====
         now = time.time()
         if current_alert and (now - last_alert_time > ALERT_COOLDOWN):
             last_alert_time = now
+
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             img_name = f"alert_{ts}.jpg"
             clip_name = f"clip_{ts}.webm"
+
             cv2.imwrite(os.path.join(IMAGE_DIR, img_name), frame)
 
             log_entry = {
@@ -138,50 +176,73 @@ def generate_stream():
 
             logs = []
             if os.path.exists(LOG_FILE):
-                with open(LOG_FILE, "r", encoding="utf-8") as f: logs = json.load(f)
+                with open(LOG_FILE, "r", encoding="utf-8") as f:
+                    logs = json.load(f)
             logs.append(log_entry)
+
             with open(LOG_FILE, "w", encoding="utf-8") as f:
                 json.dump(logs, f, indent=4, ensure_ascii=False)
 
-            # Lưu clip 10s gần nhất (dùng clip_frames)
-            threading.Thread(target=save_clip_worker, args=(clip_name, clip_frames.copy()), daemon=True).start()
+            threading.Thread(
+                target=save_clip_worker,
+                args=(clip_name, clip_frames.copy()),
+                daemon=True
+            ).start()
             clip_frames.clear()
 
-        # Nếu đang alert, append frame vào clip_frames
         if current_alert:
             clip_frames.append(frame.copy())
 
-        # Vẽ ROI và ID
+        # HIỂN THỊ
         cv2.polylines(frame, [area_points], True, (0, 255, 0), 2)
         labels = [f"ID:{tid}" for tid in detections.tracker_id]
-        frame = label_annotator.annotate(scene=frame, detections=detections, labels=labels)
+        frame = label_annotator.annotate(frame, detections, labels)
 
-        # Encode để gửi stream
+        #  FPS
+        frame_time = time.time() - start_time
+        frame_times.append(frame_time)
+        fps = round(1 / (sum(frame_times) / len(frame_times)), 2)
+
+        cv2.putText(
+            frame, f"FPS: {fps}",
+            (10, 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            (255, 255, 0), 2
+        )
+
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
+               buf.tobytes() + b"\r\n")
 
 
-# --- Flask routes ---
+#  FLASK
 @app.route("/")
-def index(): return render_template("index.html")
+def index():
+    return render_template("index.html")
 
 
 @app.route("/video_feed")
-def video_feed(): return Response(generate_stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
+def video_feed():
+    return Response(generate_stream(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/get_logs")
 def get_logs():
-    if not os.path.exists(LOG_FILE): return jsonify([])
-    with open(LOG_FILE, "r", encoding="utf-8") as f: return jsonify(json.load(f))
+    if not os.path.exists(LOG_FILE):
+        return jsonify([])
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        return jsonify(json.load(f))
 
 
 @app.route("/clips/<path:filename>")
-def clips(filename): return send_from_directory(CLIP_DIR, filename)
+def clips(filename):
+    return send_from_directory(CLIP_DIR, filename)
 
 
 @app.route("/images/<path:filename>")
-def images(filename): return send_from_directory(IMAGE_DIR, filename)
+def images(filename):
+    return send_from_directory(IMAGE_DIR, filename)
 
 
 if __name__ == "__main__":
