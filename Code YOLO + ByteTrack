@@ -1,0 +1,73 @@
+import cv2
+import supervision as sv
+from ultralytics import YOLO
+
+
+def main():
+    # 1. Load YOLOv11
+    model = YOLO("yolo11n.pt")
+
+    # 2. Mở file video thay vì webcam
+    video_path = r"C:\Users\LENOVO\Videos\Screen Recordings\Screen Recording 2025-12-17 141018.mp4"
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print(f"Không thể mở file video: {video_path}")
+        return
+
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    # 3. Khởi tạo ByteTrack
+    tracker = sv.ByteTrack()
+
+    # 4. Công cụ vẽ
+    box_annotator = sv.BoxAnnotator()
+    label_annotator = sv.LabelAnnotator()
+
+    print(f"Đang xử lý: {video_path} | Bấm Q để thoát")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Đã xử lý xong video hoặc không thể đọc frame.")
+            break
+
+
+        results = model(frame, verbose=False)[0]
+        detections = sv.Detections.from_ultralytics(results)
+
+
+        detections = detections[detections.class_id == 0]
+
+
+        detections = tracker.update_with_detections(detections)
+
+
+        labels = []
+        if detections.tracker_id is not None:
+            labels = [
+                f"ID:{tid} person {conf:.2f}"
+                for tid, conf in zip(detections.tracker_id, detections.confidence)
+            ]
+
+
+        annotated_frame = box_annotator.annotate(scene=frame.copy(), detections=detections)
+        annotated_frame = label_annotator.annotate(
+            scene=annotated_frame, detections=detections, labels=labels
+        )
+
+
+        cv2.imshow("YOLOv11 + ByteTrack (Video File)", annotated_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
